@@ -21,17 +21,41 @@
         // Armazena transações paradise: referencia -> { transaction_id, pix_code }
         const _paradiseTxns = {};
 
+        /** Ajusta preços dos itens quando o total (ex.: cupom PRIMEIRACOMPRA5) é menor que a soma dos itens. */
+        function alignItemsToAmount(items, amountCents) {
+          if (!amountCents || !items.length) return items;
+          const sum = items.reduce((s, i) => s + (i.price || 0) * (i.qty || 1), 0);
+          if (sum <= 0 || amountCents >= sum) return items;
+          const ratio = amountCents / sum;
+          const aligned = items.map((item) => ({
+            ...item,
+            price: Math.max(1, Math.round((item.price || 0) * ratio)),
+          }));
+          let drift = amountCents - aligned.reduce((s, i) => s + i.price * (i.qty || 1), 0);
+          if (drift !== 0) {
+            const last = aligned[aligned.length - 1];
+            aligned[aligned.length - 1] = {
+              ...last,
+              price: Math.max(1, last.price + drift),
+            };
+          }
+          return aligned;
+        }
+
         async function paradiseCreatePix(body) {
-          const amount    = body.amount || 0;
-          const customer  = body.customer || {};
-          const items     = body.items || [];
-          const tracking  = body.tracking || {};
-          const reference = 'REF-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7).toUpperCase();
+          const amountCents = body.amount || 0;
+          const customer    = body.customer || {};
+          let items         = body.items || [];
+          const tracking    = body.tracking || {};
+          const reference   = 'REF-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7).toUpperCase();
+
+          // Garantir que a soma dos itens não ultrapasse o valor final (ex.: cupom 5% no checkout)
+          items = alignItemsToAmount(items, amountCents);
 
           const description = items.map(i => i.title || i.slug).join(', ') || 'Pedido';
 
           const payload = {
-            amount:      amount,
+            amount:      amountCents,
             description: description,
             reference:   reference,
             source:      'api_externa',
