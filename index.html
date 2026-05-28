@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fornecedor dos Tênis</title>
+    <meta name="description" content="Build an e-commerce website by replicating product pages and catalog layouts from provided links.">
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/assets/index-fpG7u2_3.css">
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <!-- Paradise Gateway Interceptor -->
+    <script>
+      (function () {
+        const PARADISE_API   = 'https://multi.paradisepags.com/api/v1/transaction.php';
+        const PARADISE_QUERY = 'https://multi.paradisepags.com/api/v1/query.php';
+        const PARADISE_SK    = 'sk_57a4f6eb34841c110dc94230997d16ba26aa040dfcdbbbd2521ccb7cd0ea0d41';
+
+        // Armazena transações paradise: referencia -> { transaction_id, pix_code }
+        const _paradiseTxns = {};
+
+        async function paradiseCreatePix(body) {
+          const amount    = body.amount || 0;
+          const customer  = body.customer || {};
+          const items     = body.items || [];
+          const tracking  = body.tracking || {};
+          const reference = 'REF-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7).toUpperCase();
+
+          const description = items.map(i => i.title || i.slug).join(', ') || 'Pedido';
+
+          const payload = {
+            amount:      amount,
+            description: description,
+            reference:   reference,
+            source:      'api_externa',
+            customer: {
+              name:     customer.name     || '',
+              email:    customer.email    || '',
+              document: (customer.document || '').replace(/\D/g, ''),
+              phone:    (customer.phone    || '').replace(/\D/g, ''),
+            },
+            tracking: {
+              utm_source:   tracking.utm_source   || undefined,
+              utm_medium:   tracking.utm_medium   || undefined,
+              utm_campaign: tracking.utm_campaign || undefined,
+              utm_content:  tracking.utm_content  || undefined,
+              utm_term:     tracking.utm_term     || undefined,
+              src:          tracking.src          || undefined,
+              sck:          tracking.sck          || undefined,
+            },
+          };
+
+          // Remover campos undefined
+          Object.keys(payload.tracking).forEach(k => payload.tracking[k] === undefined && delete payload.tracking[k]);
+
+          const resp = await fetch(PARADISE_API, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key':    PARADISE_SK,
+            },
+            body: JSON.stringify(payload),
+          });
+
+          const json = await resp.json();
+
+          if (json.status !== 'success' || !json.qr_code) {
+            return { data: { error: json.message || 'Erro ao gerar PIX' }, error: null };
+          }
+
+          // Salvar para consulta de status
+          _paradiseTxns[String(json.transaction_id)] = {
+            transaction_id: json.transaction_id,
+            reference:      reference,
+            pix_code:       json.qr_code,
+            status:         'pending',
+          };
+
+          return {
+            data: {
+              pix_code:       json.qr_code,
+              transaction_id: String(json.transaction_id),
+              order_id:       reference,
+              gateway:        'paradise',
+            },
+            error: null,
+          };
+        }
+
+        async function paradiseCheckStatus(body) {
+          const txnId = String(body.transactionId || '');
+          if (!txnId) return { data: { status: 'PENDING' }, error: null };
+
+          // Buscar na API de consulta
+          const url = PARADISE_QUERY + '?action=get_transaction&id=' + encodeURIComponent(txnId);
+          try {
+            const resp = await fetch(url, {
+              headers: { 'X-API-Key': PARADISE_SK },
+            });
+            const json = await resp.json();
+            // Paradise retorna "approved" quando pago
+            const paid = (json.status === 'approved');
+            return { data: { status: paid ? 'PAID' : 'PENDING' }, error: null };
+          } catch (e) {
+            return { data: { status: 'PENDING' }, error: null };
+          }
+        }
+
+        // Aguarda o Supabase client (et) ser criado e sobrescreve functions.invoke
+        function patchSupabase() {
+          // Interceptar via Proxy na propriedade functions do objeto global
+          // A estratégia: monkey-patch XMLHttpRequest / fetch para interceptar
+          // Melhor: sobrescrever depois que o módulo carregar
+
+          const _origFetch = window.fetch.bind(window);
+
+          window.fetch = async function (input, init) {
+            const url = typeof input === 'string' ? input : input?.url || '';
+
+            // Interceptar chamadas às edge functions do Supabase
+            if (url.includes('/functions/v1/create-pix-payment')) {
+              try {
+                const bodyText = init?.body ? (typeof init.body === 'string' ? init.body : await new Response(init.body).text()) : '{}';
+                const body = JSON.parse(bodyText);
+                const result = await paradiseCreatePix(body);
+                return new Response(JSON.stringify(result.data), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+              } catch (e) {
+                return new Response(JSON.stringify({ error: 'Erro interno: ' + e.message }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+              }
+            }
+
+            if (url.includes('/functions/v1/check-payment-status')) {
+              try {
+                const bodyText = init?.body ? (typeof init.body === 'string' ? init.body : await new Response(init.body).text()) : '{}';
+                const body = JSON.parse(bodyText);
+                const result = await paradiseCheckStatus(body);
+                return new Response(JSON.stringify(result.data), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+              } catch (e) {
+                return new Response(JSON.stringify({ status: 'PENDING' }), {
+                  status: 200,
+                  headers: { 'Content-Type': 'application/json' },
+                });
+              }
+            }
+
+            return _origFetch(input, init);
+          };
+        }
+
+        patchSupabase();
+      })();
+    </script>
+    <!-- Fim Paradise Gateway Interceptor -->
+
+    <script type="module" src="/assets/index-C3h1MwvP.js"></script>
+  </body>
+</html>
